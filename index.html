@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio BPM Detector</title>
+<meta name="description" content='Upload a music file to estimate its tempo (BPM), analyzed locally in your browser using onset detection.'>
+<meta name="google-site-verification" content="REPLACE_ME">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+    :root{
+      --bg:#0d0f11;--panel:#15181b;--line:#262b30;--text:#d8dee3;
+      --muted:#7c8791;--accent:#5ec9a6;--accent2:#e8b34f;
+    }
+    *{box-sizing:border-box;}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;line-height:1.5;padding:32px 16px 64px;}
+    .wrap{max-width:640px;margin:0 auto;}
+    h1{font-size:20px;margin:0 0 6px;color:#fff;font-weight:600;}
+    .desc{color:var(--muted);font-size:13px;margin:0 0 24px;}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:20px;margin-bottom:20px;}
+    label{display:block;font-size:12px;color:var(--muted);margin:14px 0 6px;}
+    label:first-child{margin-top:0;}
+    input, select{width:100%;background:#0a0c0e;border:1px solid var(--line);color:var(--text);padding:9px 10px;border-radius:4px;font-family:inherit;font-size:14px;}
+    input[type=file]{padding:8px;}
+    input:focus, select:focus{outline:1px solid var(--accent);}
+    button{margin-top:18px;width:100%;background:var(--accent);color:#08110d;border:none;padding:11px;border-radius:4px;font-family:inherit;font-weight:600;font-size:14px;cursor:pointer;}
+    button:hover{opacity:0.9;}
+    .result{margin-top:18px;padding:14px;border:1px dashed var(--line);border-radius:4px;font-size:14px;min-height:20px;}
+    .result .big{font-size:22px;color:var(--accent2);font-weight:600;display:block;margin-bottom:4px;}
+    table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+    th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;}
+    th{color:var(--muted);font-weight:600;}
+    .note{color:var(--muted);font-size:12px;margin-top:20px;}
+    a{color:var(--accent);}
+    canvas{max-width:100%;border-radius:4px;border:1px solid var(--line);background:#0a0c0e;}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Audio BPM Detector</h1>
+  <p class="desc">Upload a music file to estimate its tempo in BPM.</p>
+  <div class="panel">
+    
+    <label for="file">Audio file</label>
+    <input type="file" id="file" accept="audio/*">
+
+    <button onclick="calc()">Detect BPM</button>
+    <div class="result" id="result"></div>
+  </div>
+  <p class="note">Estimate based on energy onset detection - works best on tracks with a clear beat. Processed locally in your browser.</p>
+</div>
+<script>
+
+function decodeAudioFile(fileInputId, cb, errCb){
+  var input = document.getElementById(fileInputId);
+  var file = input.files[0];
+  if (!file) { return null; }
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    var actx = new Ctx();
+    actx.decodeAudioData(e.target.result, function(buffer){
+      cb(buffer, file, e.target.result);
+    }, function(err){
+      if (errCb) errCb(err); else document.getElementById('result').innerHTML = 'Could not decode this audio file in your browser.';
+    });
+  };
+  reader.readAsArrayBuffer(file);
+  return file;
+}
+function toMono(buffer){
+  var chs = buffer.numberOfChannels;
+  var len = buffer.length;
+  var out = new Float32Array(len);
+  var c, i, data;
+  for (c = 0; c < chs; c++) {
+    data = buffer.getChannelData(c);
+    for (i = 0; i < len; i++) { out[i] += data[i] / chs; }
+  }
+  return out;
+}
+
+function calc(){
+  decodeAudioFile('file', function(buffer){
+    var samples = toMono(buffer);
+    var sr = buffer.sampleRate;
+    var maxLen = Math.min(samples.length, sr*30);
+    var winSize = Math.floor(sr*0.02);
+    var numWins = Math.floor(maxLen/winSize);
+    var energy = new Float32Array(numWins);
+    var w, i, sum;
+    for (w=0; w<numWins; w++){
+      sum = 0;
+      for (i=0;i<winSize;i++){ var s = samples[w*winSize+i]; sum += s*s; }
+      energy[w] = sum;
+    }
+    var diff = new Float32Array(numWins);
+    for (w=1; w<numWins; w++){ diff[w] = Math.max(0, energy[w]-energy[w-1]); }
+    var mean = 0;
+    for (w=0; w<numWins; w++){ mean += diff[w]; }
+    mean /= numWins;
+    var threshold = mean*1.5;
+    var peaks = [];
+    for (w=2; w<numWins-2; w++){
+      if (diff[w] > threshold && diff[w] > diff[w-1] && diff[w] >= diff[w+1]) {
+        peaks.push(w * 0.02);
+      }
+    }
+    if (peaks.length < 2) { document.getElementById('result').innerHTML = 'Not enough rhythmic onsets detected to estimate BPM.'; return; }
+    var intervals = [];
+    for (i=1;i<peaks.length;i++){ intervals.push(peaks[i]-peaks[i-1]); }
+    var bpmVotes = {};
+    var iv, bpm, bucket;
+    for (i=0;i<intervals.length;i++){
+      iv = intervals[i];
+      if (iv <= 0) continue;
+      bpm = 60/iv;
+      while (bpm < 70) bpm *= 2;
+      while (bpm > 180) bpm /= 2;
+      bucket = Math.round(bpm);
+      bpmVotes[bucket] = (bpmVotes[bucket]||0)+1;
+    }
+    var best = null, bestCount = 0;
+    for (bucket in bpmVotes) { if (bpmVotes[bucket] > bestCount) { bestCount = bpmVotes[bucket]; best = bucket; } }
+    document.getElementById('result').innerHTML = '<span class="big">~' + best + ' BPM</span>' + 'estimated tempo (analyzed first 30s)';
+  });
+}
+
+</script>
+</body>
+</html>
